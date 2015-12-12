@@ -21,7 +21,7 @@ type Sublist struct {
 	mu    sync.RWMutex
 	root  *level
 	count uint32
-	cache *hashmap.HashMap
+	cache map[string][]interface{}
 	cmax  int
 	stats stats
 }
@@ -74,7 +74,7 @@ const defaultCacheMax = 1024
 func New() *Sublist {
 	return &Sublist{
 		root:  newLevel(),
-		cache: hashmap.New(),
+		cache: make(map[string][]interface{}),
 		cmax:  defaultCacheMax,
 		stats: stats{since: time.Now()},
 	}
@@ -158,41 +158,41 @@ func (s *Sublist) Insert(subject []byte, sub interface{}) error {
 // addToCache will add the new entry to existing cache
 // entries if needed. Assumes write lock is held.
 func (s *Sublist) addToCache(subject []byte, sub interface{}) {
-	if s.cache.Count() == 0 {
+	if len(s.cache) == 0 {
 		return
 	}
 
 	// FIXME(dlc) avoid allocation?
-	all := s.cache.AllKeys()
-	for _, k := range all {
-		if !matchLiteral(k, subject) {
+	for k, v := range s.cache {
+		if !matchLiteral([]byte(k), subject) {
 			continue
 		}
-		r := s.cache.Get(k)
-		if r == nil {
+		if v == nil {
 			continue
 		}
-		res := r.([]interface{})
-		res = append(res, sub)
-		s.cache.Set(k, res)
+		v = append(v, sub)
+		s.cache[k] = v
 	}
 }
 
 // removeFromCache will remove the sub from any active cache entries.
 // Assumes write lock is held.
 func (s *Sublist) removeFromCache(subject []byte, sub interface{}) {
-	if s.cache.Count() == 0 {
+	if len(s.cache) == 0 {
 		return
 	}
-	all := s.cache.AllKeys()
+	all := make([]string, len(s.cache))
+	for key, _ := range s.cache {
+		all = append(all, key)
+	}
 	for _, k := range all {
-		if !matchLiteral(k, subject) {
+		if !matchLiteral([]byte(k), subject) {
 			continue
 		}
 		// FIXME(dlc), right now just remove all matching cache
 		// entries. This could be smarter and walk small result
 		// lists and delete the individual sub.
-		s.cache.Remove(k)
+		delete(s.cache, k)
 	}
 }
 
@@ -202,12 +202,12 @@ func (s *Sublist) Match(subject []byte) []interface{} {
 	// Fastpath match on cache
 	s.mu.RLock()
 	atomic.AddUint64(&s.stats.matches, 1)
-	r := s.cache.Get(subject)
+	r := s.cache[string(subject)]
 	s.mu.RUnlock()
 
 	if r != nil {
 		atomic.AddUint64(&s.stats.cacheHits, 1)
-		return r.([]interface{})
+		return r
 	}
 
 	// Cache miss
@@ -233,13 +233,13 @@ func (s *Sublist) Match(subject []byte) []interface{} {
 
 	// We use random eviction to bound the size of the cache.
 	// RR is used for speed purposes here.
-	if int(s.cache.Count()) >= s.cmax {
-		s.cache.RemoveRandom()
+	if len(s.cache) >= s.cmax {
+		hashmap.RemoveRandom(s.cache)
 	}
 	// Make sure we copy the subject key here
 	scopy := make([]byte, len(subject))
 	copy(scopy, subject)
-	s.cache.Set(scopy, results)
+	s.cache[string(scopy)] = results
 	s.mu.Unlock()
 
 	return results
@@ -480,7 +480,7 @@ func (s *Sublist) Stats() *Stats {
 
 	st := &Stats{}
 	st.NumSubs = s.count
-	st.NumCache = s.cache.Count()
+	st.NumCache = uint32(len(s.cache))
 	st.NumInserts = s.stats.inserts
 	st.NumRemoves = s.stats.removes
 	st.NumMatches = s.stats.matches
@@ -490,9 +490,8 @@ func (s *Sublist) Stats() *Stats {
 	// whip through cache for fanout stats
 	// FIXME, creating all each time could be expensive, should do a cb version.
 	tot, max := 0, 0
-	all := s.cache.All()
-	for _, r := range all {
-		l := len(r.([]interface{}))
+	for _, r := range s.cache {
+		l := len(r)
 		tot += l
 		if l > max {
 			max = l
@@ -500,7 +499,7 @@ func (s *Sublist) Stats() *Stats {
 	}
 	st.MaxFanout = uint32(max)
 	if tot > 0 {
-		st.AvgFanout = float64(tot) / float64(len(all))
+		st.AvgFanout = float64(tot) / float64(len(s.cache))
 	}
 	st.StatsTime = s.stats.since
 	return st

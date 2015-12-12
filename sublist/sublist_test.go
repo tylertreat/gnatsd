@@ -265,7 +265,7 @@ func TestCacheBounds(t *testing.T) {
 		sub := []byte(fmt.Sprintf(tmpl, i))
 		s.Match(sub)
 	}
-	cs := int(s.cache.Count())
+	cs := len(s.cache)
 	if cs > s.cmax {
 		t.Fatalf("Cache is growing past limit: %d vs %d\n", cs, s.cmax)
 	}
